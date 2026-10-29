@@ -225,7 +225,7 @@ function KeyboardShortcutsPanel({ isMac }: { isMac: boolean }) {
   ];
 
   return (
-    <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] animate-fade-in overflow-hidden">
+    <div className="rounded-xl animate-fade-in overflow-hidden neo-raised">
       <button
         type="button"
         aria-expanded={open}
@@ -599,7 +599,7 @@ export default function VideoEditor() {
                     />
                   </AccordionSection>
                 </div>
-                <div className="bg-[var(--surface)] rounded-xl border border-[var(--border)] p-5 space-y-6">
+                <div className="rounded-xl p-5 neo-raised space-y-6">
                   <AccordionSection
                     id="audio"
                     icon={<Volume2 size={12} />}
@@ -810,7 +810,7 @@ export default function VideoEditor() {
             )}
           >
             {!file && (
-              <div className="bg-[var(--surface)] border border-[var(--border)] rounded-xl p-4 animate-fade-in">
+              <div className="rounded-xl p-4 neo-raised animate-fade-in">
                 <p className="text-[10px] font-heading font-bold text-film-600 uppercase tracking-widest">
                   Getting Started
                 </p>
