@@ -23,10 +23,10 @@ describe("TipCarousel Accessibility (WCAG 2.2.2)", () => {
 
   it("renders the first tip initially and exposes pagination indicators", () => {
     render(<TipCarousel />);
-    expect(screen.getByText("100% Local Sandbox")).toBeInTheDocument();
-    expect(screen.getByText("PRIVACY FIRST")).toBeInTheDocument();
+    expect(screen.getByText("Everything stays on this device")).toBeInTheDocument();
+    expect(screen.getByText("Privacy")).toBeInTheDocument();
 
-    const dotButtons = screen.getAllByRole("button", { name: /Go to tip/i });
+    const dotButtons = screen.getAllByRole("button", { name: /Show tip/i });
     expect(dotButtons).toHaveLength(5);
     expect(dotButtons[0]).toHaveAttribute("aria-current", "true");
     expect(dotButtons[1]).not.toHaveAttribute("aria-current");
@@ -34,7 +34,7 @@ describe("TipCarousel Accessibility (WCAG 2.2.2)", () => {
 
   it("auto-advances to the next tip every 6000ms when unpaused", () => {
     render(<TipCarousel />);
-    expect(screen.getByText("100% Local Sandbox")).toBeInTheDocument();
+    expect(screen.getByText("Everything stays on this device")).toBeInTheDocument();
 
     // Advance 6000ms for rotation interval, plus 300ms for fade transition
     act(() => {
@@ -42,7 +42,7 @@ describe("TipCarousel Accessibility (WCAG 2.2.2)", () => {
       vi.advanceTimersByTime(300);
     });
 
-    expect(screen.getByText("Keep This Tab Active")).toBeInTheDocument();
+    expect(screen.getByText("Keep this tab in front")).toBeInTheDocument();
   });
 
   it("pauses auto-rotation on mouse hover and resumes on mouse leave", () => {
@@ -57,7 +57,7 @@ describe("TipCarousel Accessibility (WCAG 2.2.2)", () => {
     });
 
     // Should stay on the first tip
-    expect(screen.getByText("100% Local Sandbox")).toBeInTheDocument();
+    expect(screen.getByText("Everything stays on this device")).toBeInTheDocument();
 
     // Mouse leave to resume
     fireEvent.mouseLeave(region);
@@ -67,7 +67,7 @@ describe("TipCarousel Accessibility (WCAG 2.2.2)", () => {
       vi.advanceTimersByTime(300);
     });
 
-    expect(screen.getByText("Keep This Tab Active")).toBeInTheDocument();
+    expect(screen.getByText("Keep this tab in front")).toBeInTheDocument();
   });
 
   it("pauses auto-rotation on focus and resumes on blur", () => {
@@ -81,7 +81,7 @@ describe("TipCarousel Accessibility (WCAG 2.2.2)", () => {
       vi.advanceTimersByTime(12000);
     });
 
-    expect(screen.getByText("100% Local Sandbox")).toBeInTheDocument();
+    expect(screen.getByText("Everything stays on this device")).toBeInTheDocument();
 
     // Blur out of carousel
     fireEvent.blur(region, { relatedTarget: document.body });
@@ -91,7 +91,7 @@ describe("TipCarousel Accessibility (WCAG 2.2.2)", () => {
       vi.advanceTimersByTime(300);
     });
 
-    expect(screen.getByText("Keep This Tab Active")).toBeInTheDocument();
+    expect(screen.getByText("Keep this tab in front")).toBeInTheDocument();
   });
 
   it("toggles pause and play via the visible pause button", () => {
@@ -108,7 +108,7 @@ describe("TipCarousel Accessibility (WCAG 2.2.2)", () => {
     act(() => {
       vi.advanceTimersByTime(12000);
     });
-    expect(screen.getByText("100% Local Sandbox")).toBeInTheDocument();
+    expect(screen.getByText("Everything stays on this device")).toBeInTheDocument();
 
     // Click resume button
     fireEvent.click(pauseBtn);
@@ -119,12 +119,12 @@ describe("TipCarousel Accessibility (WCAG 2.2.2)", () => {
       vi.advanceTimersByTime(6000);
       vi.advanceTimersByTime(300);
     });
-    expect(screen.getByText("Keep This Tab Active")).toBeInTheDocument();
+    expect(screen.getByText("Keep this tab in front")).toBeInTheDocument();
   });
 
   it("jumps to selected tip when clicking a pagination dot", () => {
     render(<TipCarousel />);
-    const thirdDot = screen.getByRole("button", { name: /Go to tip 3/i });
+    const thirdDot = screen.getByRole("button", { name: /Show tip 3/i });
 
     fireEvent.click(thirdDot);
 
@@ -132,7 +132,7 @@ describe("TipCarousel Accessibility (WCAG 2.2.2)", () => {
       vi.advanceTimersByTime(300);
     });
 
-    expect(screen.getByText("Keyboard Shortcuts")).toBeInTheDocument();
+    expect(screen.getByText("Keyboard shortcuts")).toBeInTheDocument();
     expect(thirdDot).toHaveAttribute("aria-current", "true");
   });
 
@@ -156,6 +156,6 @@ describe("TipCarousel Accessibility (WCAG 2.2.2)", () => {
     act(() => {
       vi.advanceTimersByTime(12000);
     });
-    expect(screen.getByText("100% Local Sandbox")).toBeInTheDocument();
+    expect(screen.getByText("Everything stays on this device")).toBeInTheDocument();
   });
 });
