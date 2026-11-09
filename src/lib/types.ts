@@ -1,4 +1,16 @@
+import { isValidCrop, type CropRect } from "./crop";
+
 export const RECIPE_VERSION = 1;
+
+export type VideoFormat = "mp4" | "webm" | "mkv" | "gif";
+/** Sound only: the video's audio with the edit's trim, speed, volume and soundtrack. */
+export type AudioFormat = "mp3" | "wav";
+export type OutputFormat = VideoFormat | AudioFormat;
+export const OUTPUT_FORMATS: readonly OutputFormat[] = ["mp4", "webm", "mkv", "gif", "mp3", "wav"];
+
+export function isAudioFormat(format: string): format is AudioFormat {
+  return format === "mp3" || format === "wav";
+}
 
 /**
  * Text overlay data structure for rendering custom text on videos.
@@ -13,6 +25,12 @@ export interface TextOverlay {
   fontWeight: "normal" | "bold" | "900";
   fontFamily?: string; // Font family name (e.g., "Arial", "Inter", "CustomFont")
   fontPath?: string; // Path/URL to custom font file for export
+  /** When the text appears, in seconds of the source video. Absent: from the start. */
+  start?: number;
+  /** When the text disappears, in seconds of the source video. Absent: until the end. */
+  end?: number;
+  /** Draw a translucent box behind the text, for captions. */
+  box?: boolean;
 }
 
 export interface EditRecipe {
@@ -28,7 +46,7 @@ export interface EditRecipe {
   speed: number;
   volume: number;
   quality: number;
-  format: "mp4" | "webm" | "mkv" | "gif";
+  format: OutputFormat;
   stabilization: boolean;
   denoise: boolean;
   brightness: number;
@@ -37,6 +55,8 @@ export interface EditRecipe {
   soundOnCompletion: boolean;
   sharpness: number;
   textOverlays: TextOverlay[];
+  /** The part of the source kept (src/lib/crop.ts). Missing or null keeps the whole frame. */
+  crop?: CropRect | null;
   version: number;
 }
 
@@ -58,6 +78,8 @@ export interface BackgroundMusicOptions {
   musicVolume: number;
   originalAudioVolume: number;
   loopMusic: boolean;
+  /** Use the track instead of the video's own sound, rather than mixing them. */
+  replaceAudio?: boolean;
 }
 
 export interface ExportResult {
@@ -66,7 +88,7 @@ export interface ExportResult {
   size: number;
   width: number;
   height: number;
-  format: "mp4" | "webm" | "mkv" | "gif";
+  format: OutputFormat;
   exportDurationMs?: number;
   dispose(): void;
 }
@@ -139,7 +161,7 @@ export function isValidRecipe(value: unknown): value is EditRecipe {
   if (typeof v.speed !== "number" || !isFinite(v.speed)) return false;
   if (typeof v.volume !== "number" || !isFinite(v.volume)) return false;
   if (typeof v.quality !== "number" || !isFinite(v.quality)) return false;
-  if (!["mp4", "webm", "mkv", "gif"].includes(v.format)) return false;
+  if (!OUTPUT_FORMATS.includes(v.format)) return false;
   if (typeof v.stabilization !== "boolean") return false;
   if (typeof v.denoise !== "boolean") return false;
   if (typeof v.brightness !== "number" || !isFinite(v.brightness)) return false;
@@ -147,6 +169,7 @@ export function isValidRecipe(value: unknown): value is EditRecipe {
   if (typeof v.saturation !== "number" || !isFinite(v.saturation)) return false;
   if (typeof v.soundOnCompletion !== "boolean") return false;
   if (!Array.isArray(v.textOverlays)) return false;
+  if (!isValidCrop(v.crop)) return false;
 
   for (const overlay of v.textOverlays) {
     if (!overlay || typeof overlay !== "object") return false;
@@ -157,6 +180,9 @@ export function isValidRecipe(value: unknown): value is EditRecipe {
     if (typeof overlay.fontSize !== "number" || !isFinite(overlay.fontSize) || overlay.fontSize < 12 || overlay.fontSize > 120) return false;
     if (typeof overlay.color !== "string") return false;
     if (!["normal", "bold", "900"].includes(overlay.fontWeight)) return false;
+    if (overlay.start !== undefined && (typeof overlay.start !== "number" || !isFinite(overlay.start) || overlay.start < 0)) return false;
+    if (overlay.end !== undefined && (typeof overlay.end !== "number" || !isFinite(overlay.end) || overlay.end <= (overlay.start ?? 0))) return false;
+    if (overlay.box !== undefined && typeof overlay.box !== "boolean") return false;
   }
 
   return true;

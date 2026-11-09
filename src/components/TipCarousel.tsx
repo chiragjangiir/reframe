@@ -12,32 +12,32 @@ interface Tip {
 
 const TIPS: Tip[] = [
   {
-    category: "PRIVACY FIRST",
-    title: "100% Local Sandbox",
+    category: "Privacy",
+    title: "Everything stays on this device",
     description: "Your video files never leave your device. All processing happens entirely within your browser's secure client-side sandbox.",
     icon: ShieldCheck,
   },
   {
-    category: "PERFORMANCE BOOST",
-    title: "Keep This Tab Active",
+    category: "Performance",
+    title: "Keep this tab in front",
     description: "Keep this browser tab active and focused. The browser heavily throttles background WebAssembly threads to save power.",
     icon: Zap,
   },
   {
-    category: "WORKFLOW POWER",
-    title: "Keyboard Shortcuts",
+    category: "Workflow",
+    title: "Keyboard shortcuts",
     description: "Press Space to play/pause the preview, M to mute, and Ctrl/Cmd+Enter to trigger an export instantly.",
     icon: Keyboard,
   },
   {
-    category: "ENGINEERING FACT",
+    category: "How it works",
     title: "FFmpeg WebAssembly",
     description: "Reframe compiles powerful C/C++ libraries into WASM, allowing complex video pipelines to run locally in the browser.",
     icon: Cpu,
   },
   {
-    category: "PRO TIP",
-    title: "Export Quality (CRF)",
+    category: "Tip",
+    title: "Quality vs. file size",
     description: "Adjusting the Constant Rate Factor (CRF) slider gives you total control over the sweet spot between visual quality and file size.",
     icon: SlidersHorizontal,
   },
@@ -78,7 +78,7 @@ export default function TipCarousel() {
     timeoutRef.current = setTimeout(() => {
       setActiveIdx((prev) => (prev + 1) % TIPS.length);
       setIsFading(false);
-    }, 300);
+    }, 160);
   }, []);
 
   // Manage auto-rotation interval based on pause state
@@ -111,7 +111,7 @@ export default function TipCarousel() {
       if (!isPaused) {
         intervalRef.current = setInterval(rotateTip, 6000);
       }
-    }, 300);
+    }, 160);
   };
 
   const togglePlayPause = () => {
@@ -124,6 +124,7 @@ export default function TipCarousel() {
 
   return (
     <section
+      data-tip-carousel=""
       aria-roledescription="carousel"
       aria-label="Workflow tips"
       onMouseEnter={() => setIsHovered(true)}
@@ -134,30 +135,24 @@ export default function TipCarousel() {
           setIsFocused(false);
         }
       }}
-      className="mt-6 p-4 rounded-xl border bg-[var(--surface)] border-[var(--border)] text-[var(--text)] text-left flex flex-col justify-between min-h-[142px] transition-all duration-300 shadow-sm relative overflow-hidden"
+      className="mt-5 border-t border-[var(--border)] pt-4 text-left"
     >
-      {/* Dynamic Slide Container */}
       <div
+        className={`min-h-[92px] transition-opacity duration-base ${isFading ? "opacity-0" : "opacity-100"}`}
         aria-live={isPaused ? "polite" : "off"}
         aria-atomic="true"
-        className={`flex-1 transition-all duration-300 transform ${
-          isFading ? "opacity-0 -translate-y-1.5 scale-[0.99]" : "opacity-100 translate-y-0 scale-100"
-        }`}
       >
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <IconComponent className="text-film-600" size={14} />
-            <span className="text-[10px] font-heading font-bold uppercase tracking-widest text-film-600">
-              {activeTip.category}
-            </span>
+        <div className="flex items-center justify-between gap-1.5 text-xs font-medium text-[var(--selected)]">
+          <div className="flex items-center gap-1.5">
+            <IconComponent size={13} aria-hidden="true" />
+            {activeTip.category}
           </div>
-
           <button
             type="button"
             onClick={togglePlayPause}
             aria-label={isManuallyPaused ? "Resume auto-rotation" : "Pause auto-rotation"}
             aria-pressed={isManuallyPaused}
-            className="p-1 rounded text-[var(--muted)] hover:text-[var(--text)] transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-film-600 cursor-pointer"
+            className="p-1 rounded text-[var(--muted)] hover:text-[var(--text)] transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-[var(--selected)] cursor-pointer"
           >
             {isManuallyPaused ? (
               <Play size={12} aria-hidden="true" />
@@ -166,31 +161,27 @@ export default function TipCarousel() {
             )}
           </button>
         </div>
-
-        <h4 className="text-xs font-heading font-bold mt-1 text-[var(--text)] tracking-wide uppercase">
-          {activeTip.title}
-        </h4>
-
-        <p className="text-[11px] leading-relaxed text-[var(--muted)] mt-1.5">
-          {activeTip.description}
-        </p>
+        <h3 className="serif mt-1.5 text-lg leading-snug text-[var(--text)]">{activeTip.title}</h3>
+        <p className="mt-1 text-xs leading-relaxed text-[var(--muted)]">{activeTip.description}</p>
       </div>
 
-      {/* Pagination Indicators */}
-      <div className="flex items-center justify-center gap-1.5 mt-4">
+      <div className="mt-3 flex items-center justify-center gap-1">
         {TIPS.map((tip, idx) => (
           <button
             key={idx}
             type="button"
             onClick={() => handleDotClick(idx)}
-            aria-label={`Go to tip ${idx + 1}: ${tip.title}`}
+            aria-label={`Show tip ${idx + 1} of ${TIPS.length}: ${tip.title}`}
             aria-current={idx === activeIdx ? "true" : undefined}
-            className={`h-1.5 rounded-full transition-all duration-300 ease-out cursor-pointer ${
-              idx === activeIdx
-                ? "w-4 bg-film-600"
-                : "w-1.5 bg-[var(--border)] hover:opacity-80"
-            }`}
-          />
+            className="flex h-6 w-6 items-center justify-center rounded-full"
+          >
+            <span
+              aria-hidden="true"
+              className={`block h-[3px] rounded-full transition-[width,background-color] duration-base ${
+                idx === activeIdx ? "w-4 bg-[var(--text)]" : "w-1.5 bg-[var(--border-strong)]"
+              }`}
+            />
+          </button>
         ))}
       </div>
     </section>
