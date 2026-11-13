@@ -10,6 +10,8 @@ import {
   TimelineTrack,
   MultiTrackEditorState,
   isValidRecipe,
+  OUTPUT_FORMATS,
+  isAudioFormat,
 } from "@/lib/types";
 import { createHistory, deepEqual, historyReducer, type EditState } from "@/lib/editHistory";
 import {
@@ -30,8 +32,26 @@ import {
 } from "@/lib/project";
 import { DEFAULT_RECIPE, SPEED_STEPS } from "@/lib/constants";
 import { getPresetById } from "@/lib/presets";
-import { loadFFmpeg, exportVideo, terminateFFmpeg, FFmpegLoadError } from "@/lib/ffmpeg";
-import { trackAction } from "@/lib/telemetry";
+import {
+  loadFFmpeg,
+  exportVideo,
+  terminateFFmpeg,
+  getEngineMode,
+  FFmpegLoadError,
+  ExportStalledError,
+} from "@/lib/ffmpeg";
+import {
+  addTelemetryRedaction,
+  durationBucket,
+  failureCategory,
+  HANDLED_ERROR_PREFIX,
+  resolutionBucket,
+  sizeBucket,
+  trackVital,
+} from "@/lib/telemetry";
+import { ExportAttempt, type ExportFailureCategory } from "@/lib/exportTelemetry";
+import { NO_SOUND_MESSAGE, resolveOutputSize } from "@/lib/ffmpegArgs";
+import { applyProfile, type ProfileSettings } from "@/lib/exportProfiles";
 import { suggestPreset } from "@/lib/presetSuggestion";
 import { validateDimensions, getDownscaledDimensions } from "@/utils/video-validation";
 import {
@@ -55,9 +75,18 @@ import {
   EDITOR_STATE_KEY,
 } from "@/lib/editorPersistence";
 import { saveSessionFile, loadSessionFile, clearSessionFile } from "@/lib/sessionDB";
+import { resolveDuration } from "@/lib/mediaDuration";
+import { clearFrameCache } from "@/lib/frameCache";
+import { trackExportTools, trackFeature } from "@/lib/featureTelemetry";
+import { clampCrop, isFullFrame, isValidCrop } from "@/lib/crop";
 
 const DEFAULT_TITLE = "Reframe — Resize, trim, and export videos in your browser";
 const PROJECT_SAVE_DELAY_MS = 500;
+/**
+ * A cancel after this long without the progress percentage changing is
+ * reported as stuck (export_cancelled.stuck): the user gave up on a hang.
+ */
+const STUCK_CANCEL_MS = 60_000;
 
 /** A saved project whose source video has to be chosen again. */
 export interface PendingRecovery {
@@ -90,6 +119,7 @@ function withNewSource(edit: EditState, width: number, height: number): EditStat
       ...edit.recipe,
       trimStart: 0,
       trimEnd: null,
+      crop: null,
       ...(edit.recipe.preset === DEFAULT_RECIPE.preset ? { preset: suggested } : {}),
     },
   };
@@ -105,6 +135,29 @@ function clearSavedEditorData() {
     // ignore
   }
   clearSessionFile().catch(console.error);
+  void clearFrameCache();
+}
+
+/** Mirrors recipe changes into the URL at most this often (slider drags fire per pixel). */
+const URL_SYNC_DEBOUNCE_MS = 250;
+
+/** User-facing message for a failed export; never echoes raw FFmpeg output. */
+export function describeExportError(err: unknown): string {
+  // Both already say what happened and what to do next.
+  if (err instanceof ExportStalledError || err instanceof FFmpegLoadError) return err.message;
+  if (err instanceof Error && err.message === NO_SOUND_MESSAGE) return err.message;
+  switch (failureCategory(err)) {
+    case "network":
+      return "Network error while loading the video engine. Check your connection and try again.";
+    case "codec":
+      return "This video format is not supported. Try converting it to MP4 (H.264) first.";
+    case "memory":
+      return "The browser ran out of memory. Try a shorter clip, a smaller output size, or close other tabs.";
+    case "crash":
+      return "The video engine crashed while encoding. Your settings are kept — try again, or choose a different format.";
+    default:
+      return "Export failed. Your settings are kept — try again, or try a different format.";
+  }
 }
 
 export function extractMetadata(
@@ -123,12 +176,14 @@ export function extractMetadata(
     }, 5000);
 
     video.preload = "metadata";
-    video.onloadedmetadata = () => {
+    video.onloadedmetadata = async () => {
       clearTimeout(timeout);
+      // Screen recordings report an Infinity duration until read to the end.
+      const duration = await resolveDuration(video);
       resolve({
         width: video.videoWidth,
         height: video.videoHeight,
-        duration: isFinite(video.duration) ? video.duration : 0,
+        duration,
       });
       URL.revokeObjectURL(url);
     };
@@ -199,6 +254,10 @@ function validateRecipe(recipe: EditRecipe, duration: number): string | null {
       "Please select a valid playback speed.",
     ],
     [recipe.quality < 18 || recipe.quality > 30, "Quality must be between 18 and 30."],
+    [
+      isAudioFormat(recipe.format) && !recipe.keepAudio,
+      "The sound is off. Turn it on in Audio and speed to export audio only.",
+    ],
     [recipe.brightness < -1 || recipe.brightness > 1, "Brightness must be between -1 and 1."],
 
     [recipe.contrast < 0 || recipe.contrast > 2, "Contrast must be between 0 and 2."],
@@ -265,13 +324,15 @@ function isValidValue(key: keyof EditRecipe, val: any): boolean {
     case "quality":
       return typeof val === "number" && !isNaN(val) && val >= 18 && val <= 30;
     case "format":
-      return val === "mp4" || val === "webm" || val === "mkv" || val === "gif";
+      return typeof val === "string" && (OUTPUT_FORMATS as readonly string[]).includes(val);
     case "brightness":
       return typeof val === "number" && !isNaN(val) && val >= -1 && val <= 1;
     case "contrast":
       return typeof val === "number" && !isNaN(val) && val >= 0 && val <= 2;
     case "saturation":
       return typeof val === "number" && !isNaN(val) && val >= 0 && val <= 3;
+    case "crop":
+      return isValidCrop(val);
     default:
       return true;
   }
@@ -307,20 +368,40 @@ export function useVideoEditor() {
   const [error, setError] = useState<string | null>(null);
   const [fileError, setFileError] = useState("");
   const [exportStartedAt, setExportStartedAt] = useState<number | null>(null);
+  /** Shown during an export when something changed mid-way (engine fallback). */
+  const [exportNotice, setExportNotice] = useState<string | null>(null);
   const exportAbortControllerRef = useRef<AbortController | null>(null);
   const exportCancelledRef = useRef(false);
+  /** When the export progress percentage last changed (see STUCK_CANCEL_MS). */
+  const lastProgressAtRef = useRef(0);
+  const lastProgressRef = useRef(-1);
+  const trackProgress = useCallback((percent: number) => {
+    if (percent !== lastProgressRef.current) {
+      lastProgressRef.current = percent;
+      lastProgressAtRef.current = Date.now();
+    }
+    setProgress(percent);
+  }, []);
+  /** The export attempt in progress, which reports its single outcome. */
+  const exportAttemptRef = useRef<ExportAttempt | null>(null);
+  // Category of the last failed export for this source, so the next attempt
+  // is reported as a retry; cleared by a success or a new source video.
+  const lastFailureRef = useRef<ExportFailureCategory | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  /** performance.now() when the current video was chosen (first_preview_frame). */
+  const fileChosenAtRef = useRef<number | null>(null);
 
   const [musicFile, setMusicFile] = useState<File | null>(null);
-  const [musicVolume, setMusicVolume] = useState(70);
+  const [musicVolume, setMusicVolume] = useState(100);
   const [originalAudioVolume, setOriginalAudioVolume] = useState(40);
   const [loopMusic, setLoopMusic] = useState(false);
+  // A soundtrack replaces the video's sound unless the user picks a mix.
+  const [replaceAudio, setReplaceAudio] = useState(true);
 
   const [overlayFile, setOverlayFile] = useState<File | null>(null);
   const overlayPosition = edit.imageOverlay.position;
   const overlaySize = edit.imageOverlay.size;
   const overlayOpacity = edit.imageOverlay.opacity;
-  const [currentTime, setCurrentTime] = useState(0);
 
   // Phase 1 MVP: Multi-track timeline support
   const [multiTrackState, setMultiTrackState] =
@@ -373,6 +454,8 @@ export function useVideoEditor() {
         }
       }
       if (Object.keys(validated).length === 0) return;
+      // A crop that keeps the whole frame is stored as no crop.
+      if (validated.crop) validated.crop = isFullFrame(validated.crop) ? null : clampCrop(validated.crop);
 
       updateEdit((prev) => {
         const next = { ...prev.recipe, ...validated };
@@ -380,9 +463,19 @@ export function useVideoEditor() {
         if (next.format === "gif") {
           next.keepAudio = false;
         }
+        // Choosing an audio-only format turns the sound back on.
+        if (validated.format && isAudioFormat(validated.format) && !isAudioFormat(prev.recipe.format)) {
+          next.keepAudio = true;
+        }
         return { ...prev, recipe: next };
       });
     },
+    [updateEdit]
+  );
+
+  /** Applies an export profile's output settings as one undoable step. */
+  const applyExportProfile = useCallback(
+    (settings: ProfileSettings) => updateEdit((prev) => applyProfile(prev, settings)),
     [updateEdit]
   );
 
@@ -511,35 +604,55 @@ export function useVideoEditor() {
     };
   }, [resetEdit, updateRecovery]);
 
+  // Time from choosing a video to its first frame in the preview: the
+  // editor's "ready" moment. Input size bucket only.
+  useEffect(() => {
+    const video = videoRef.current;
+    const startedAt = fileChosenAtRef.current;
+    if (!file || !video || startedAt === null) return;
+    const report = () => {
+      if (fileChosenAtRef.current !== startedAt) return;
+      fileChosenAtRef.current = null;
+      trackVital("first_preview_frame", startedAt, { input_size: sizeBucket(file.size) });
+    };
+    if (video.readyState >= 2) {
+      report();
+      return;
+    }
+    video.addEventListener("loadeddata", report, { once: true });
+    return () => video.removeEventListener("loadeddata", report);
+  }, [file]);
+
+  // Debounced: replaceState on every slider tick is wasted work and Safari
+  // throws after 100 calls in 30 seconds.
   useEffect(() => {
     if (typeof window === "undefined") return;
-    try {
-      const params = new URLSearchParams();
-      const recipeKeys = Object.keys(DEFAULT_RECIPE) as Array<keyof EditRecipe>;
+    const timer = setTimeout(() => {
+      try {
+        const params = new URLSearchParams();
+        const recipeKeys = Object.keys(DEFAULT_RECIPE) as Array<keyof EditRecipe>;
 
-      recipeKeys.forEach((key) => {
-        const currentVal = recipe[key];
-        const defaultVal = DEFAULT_RECIPE[key];
+        recipeKeys.forEach((key) => {
+          const currentVal = recipe[key];
+          const defaultVal = DEFAULT_RECIPE[key];
+          // Lists such as textOverlays can't round-trip through a query string.
+          if (typeof defaultVal === "object" && defaultVal !== null) return;
+          if (currentVal !== defaultVal) {
+            params.set(key, currentVal === null ? "null" : String(currentVal));
+          }
+        });
 
-        // Lists such as textOverlays can't round-trip through a query string.
-        if (typeof defaultVal === "object" && defaultVal !== null) return;
-        if (currentVal !== defaultVal) {
-          params.set(key, currentVal === null ? "null" : String(currentVal));
+        const newQuery = params.toString();
+        const currentQuery = window.location.search.replace(/^\?/, "");
+        if (newQuery !== currentQuery) {
+          const newUrl = newQuery ? `${window.location.pathname}?${newQuery}` : window.location.pathname;
+          window.history.replaceState(null, "", newUrl);
         }
-      });
-
-      const newQuery = params.toString();
-      const currentQuery = window.location.search.replace(/^\?/, "");
-
-      if (newQuery !== currentQuery) {
-        const newUrl = newQuery
-          ? `${window.location.pathname}?${newQuery}`
-          : window.location.pathname;
-        window.history.replaceState(null, "", newUrl);
+      } catch {
+        // ignore
       }
-    } catch (e) {
-      // ignore
-    }
+    }, URL_SYNC_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
   }, [recipe]);
 
   // Persist the full recipe (debounced)
@@ -566,6 +679,7 @@ export function useVideoEditor() {
   }, [videoMetadata]);
 
   const handleFileSelect = useCallback((selectedFile: File | null) => {
+    fileChosenAtRef.current = selectedFile ? performance.now() : null;
     setResult(null);
     setStatus("idle");
     setError(null);
@@ -640,6 +754,7 @@ export function useVideoEditor() {
         setDuration(dur);
         setVideoMetadata({ width, height, duration: dur });
         setFile(selectedFile);
+        lastFailureRef.current = null;
         setStorageStatus((prev) => ({ ...prev, sourceCopy: "saving" }));
         saveSessionFile(selectedFile)
           .then(() => setStorageStatus((prev) => ({ ...prev, sourceCopy: "saved" })))
@@ -690,38 +805,68 @@ export function useVideoEditor() {
     exportAbortControllerRef.current = abortController;
     exportCancelledRef.current = false;
 
+    const output = resolveOutputSize(recipe);
+    const clipSeconds = ((recipe.trimEnd ?? duration) - recipe.trimStart) / recipe.speed;
+    // Low-cardinality only: never the file name, captions or exact values.
+    const attempt = new ExportAttempt(
+      {
+        format: recipe.format,
+        resolution: resolutionBucket(output.width, output.height),
+        input_size: sizeBucket(file.size),
+        clip_length: durationBucket(clipSeconds),
+        has_text: (recipe.textOverlays?.length ?? 0) > 0,
+        has_music: Boolean(musicFile),
+        has_image_overlay: Boolean(overlayFile),
+      },
+      lastFailureRef.current
+    );
+    exportAttemptRef.current = attempt;
+    // Anonymous counts of which tools exports use (never their values).
+    trackExportTools(recipe, { music: Boolean(musicFile), imageOverlay: Boolean(overlayFile) });
+
     try {
-      trackAction("export_start");
       setStatus("loading-engine");
-      setProgress(0);
+      trackProgress(0);
+      setExportNotice(null);
       setError(null);
       setExportStartedAt(null);
       if (result?.blobUrl) URL.revokeObjectURL(result.blobUrl);
       setResult(null);
 
-      await loadFFmpeg(abortController.signal, setProgress);
+      await loadFFmpeg(abortController.signal, trackProgress);
       if (exportCancelledRef.current) return;
 
       const startedAt = Date.now();
+      attempt.encoding(getEngineMode());
+      // The engine reports 100% when it finishes loading; without this reset
+      // the export dialog opened at "100%" until FFmpeg's first progress event.
+      trackProgress(0);
       setExportStartedAt(startedAt);
       setStatus("exporting");
 
       const exportResult = await exportVideo(
         file,
         recipe,
-        setProgress,
+        trackProgress,
         abortController.signal,
         {
           file: musicFile,
           musicVolume,
           originalAudioVolume,
           loopMusic,
+          replaceAudio,
         },
         {
           file: overlayFile,
           position: overlayPosition,
           size: overlaySize,
           opacity: overlayOpacity,
+        },
+        duration,
+        (reason) => {
+          // Same export, same edits, on the slower but sturdier engine.
+          attempt.engineFallback(reason);
+          setExportNotice("Switched to the single-threaded engine and started again. This takes longer.");
         }
       );
       if (exportCancelledRef.current) return;
@@ -731,32 +876,39 @@ export function useVideoEditor() {
         exportDurationMs: Date.now() - startedAt,
       });
       setStatus("done");
-      trackAction("export_success", { durationMs: Date.now() - startedAt });
+      attempt.succeeded(sizeBucket(exportResult.size), clipSeconds);
+      lastFailureRef.current = null;
     } catch (err) {
+      // A cancellation was already reported by cancelExport; a settled
+      // attempt ignores further outcomes, so a late rejection adds nothing.
       if (exportCancelledRef.current) return;
-      trackAction("export_failure", { reason: err instanceof Error ? err.name : "unknown" });
+      const category = attempt.failed(err);
+      if (category) lastFailureRef.current = category;
 
-      console.error("export failed:", err);
-      if (err instanceof FFmpegLoadError) {
-        setError(err.message);
-      } else if (err instanceof Error && err.message.includes("network")) {
-        setError("Network error. Check your internet connection and try again.");
-      } else if (err instanceof Error && err.message.includes("codec")) {
-        setError("This video format is not supported. Try converting to MP4 first.");
-      } else {
-        setError("Export failed. Please try again or use a different video.");
-      }
+      // Reported above as export_failed; the prefix keeps RUM's automatic
+      // console-error collection from reporting it a second time.
+      console.error(`${HANDLED_ERROR_PREFIX} export failed:`, err);
+      setError(describeExportError(err));
       setExportStartedAt(null);
       setStatus("error");
+      // A failed FFmpeg run can leave the engine's virtual filesystem or heap
+      // in a bad state (e.g. after running out of memory). Start the retry
+      // from a fresh worker; the core files come back from the HTTP cache.
+      terminateFFmpeg();
     } finally {
       if (exportAbortControllerRef.current === abortController) {
         exportAbortControllerRef.current = null;
       }
+      if (exportAttemptRef.current === attempt) {
+        exportAttemptRef.current = null;
+      }
     }
   }, [
+    trackProgress,
     duration,
     file,
     loopMusic,
+    replaceAudio,
     musicFile,
     musicVolume,
     originalAudioVolume,
@@ -863,7 +1015,22 @@ export function useVideoEditor() {
     updateEdit((prev) => toEditState(DEFAULT_RECIPE, prev.imageOverlay));
   }, [updateEdit]);
 
+  // Keep user-specific strings (file names, captions) out of anything the
+  // RUM SDK collects on its own, such as console errors.
+  useEffect(() => {
+    addTelemetryRedaction(
+      file?.name,
+      musicFile?.name,
+      overlayFile?.name,
+      recovery?.source.name,
+      ...(recipe.textOverlays ?? []).map((overlay) => overlay.text)
+    );
+  }, [file, musicFile, overlayFile, recovery, recipe.textOverlays]);
+
   const cancelExport = useCallback(() => {
+    const stuck = Date.now() - lastProgressAtRef.current >= STUCK_CANCEL_MS;
+    exportAttemptRef.current?.cancelled(stuck);
+    exportAttemptRef.current = null;
     exportCancelledRef.current = true;
     exportAbortControllerRef.current?.abort();
     exportAbortControllerRef.current = null;
@@ -875,6 +1042,7 @@ export function useVideoEditor() {
   }, []);
 
   const reset = useCallback(() => {
+    lastFailureRef.current = null;
     if (result?.blobUrl) URL.revokeObjectURL(result.blobUrl);
     setFile(null);
     setVideoMetadata(null);
@@ -900,6 +1068,7 @@ export function useVideoEditor() {
 
   /** Removes everything this editor saved in the browser and starts over. */
   const deleteSavedData = useCallback(() => {
+    lastFailureRef.current = null;
     if (result?.blobUrl) URL.revokeObjectURL(result.blobUrl);
     pendingSaveRef.current = null;
     clearSavedEditorData();
@@ -923,10 +1092,14 @@ export function useVideoEditor() {
   // Undo is blocked mid-export: the running export has already captured its
   // settings, and the result has to match what the controls showed.
   const undoEdit = useCallback(() => {
-    if (!isBusy) dispatchHistory({ type: "undo" });
+    if (isBusy) return;
+    dispatchHistory({ type: "undo" });
+    trackFeature("history", "undo");
   }, [isBusy]);
   const redoEdit = useCallback(() => {
-    if (!isBusy) dispatchHistory({ type: "redo" });
+    if (isBusy) return;
+    dispatchHistory({ type: "redo" });
+    trackFeature("history", "redo");
   }, [isBusy]);
 
   const currentSource = useMemo(
@@ -948,7 +1121,7 @@ export function useVideoEditor() {
     setStorageStatus((prev) =>
       ok
         ? { ...prev, savedAt: Date.parse(doc.savedAt), error: null }
-        : { ...prev, error: "Couldn't save your edits in this browser. Use “Save project file” to keep them." }
+        : { ...prev, error: "Couldn't save your edits in this browser, so a refresh will lose them." }
     );
   }, []);
 
@@ -985,6 +1158,7 @@ export function useVideoEditor() {
   const buildProjectFile = useCallback(() => {
     const source = currentSource ?? recoveryRef.current?.source ?? null;
     const doc = createProjectDocument(edit, source, new Date());
+    trackFeature("project_file", "save");
     return { fileName: projectFileName(source), contents: serializeProject(doc) };
   }, [currentSource, edit]);
 
@@ -999,6 +1173,7 @@ export function useVideoEditor() {
         // Nothing open yet: hold the edits until the matching video is chosen.
         resetEdit(() => project.edit);
         if (project.source) updateRecovery({ source: project.source, origin: "imported" });
+        trackFeature("project_file", "open");
         return {
           ok: true,
           message: project.source
@@ -1016,6 +1191,7 @@ export function useVideoEditor() {
           message: `Edits applied. This project was made for “${project.source.name}”, so check the trim points.`,
         };
       }
+      trackFeature("project_file", "open");
       return { ok: true, message: "Project opened and applied to this video." };
     },
     [currentSource, isBusy, resetEdit, updateEdit, updateRecovery]
@@ -1044,25 +1220,26 @@ export function useVideoEditor() {
       videoRef.current.currentTime = time;
     }
   }, []);
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    const handleTimeUpdate = () => setCurrentTime(video.currentTime);
-    video.addEventListener("timeupdate", handleTimeUpdate);
-    return () => video.removeEventListener("timeupdate", handleTimeUpdate);
-  });
+
+  // Playback position is read from the <video> on demand instead of being
+  // mirrored into React state: a `timeupdate` listener here (re-attached on
+  // every render) re-rendered the whole editor 4–60 times a second during
+  // playback. Components that need the playhead subscribe to the element.
+  const getCurrentTime = useCallback(() => videoRef.current?.currentTime ?? 0, []);
 
   const toggleSound = useCallback(() => {
     setSoundOnCompletion((prev) => !prev);
   }, []);
 
   return {
+    videoMetadata,
     file,
     duration,
     recipe,
     status,
     progress,
     exportStartedAt,
+    exportNotice,
     result,
     error,
     videoRef,
@@ -1074,6 +1251,7 @@ export function useVideoEditor() {
     cancelExport,
     reset,
     resetSettings,
+    applyExportProfile,
     undo: undoEdit,
     redo: redoEdit,
     canUndo,
@@ -1092,6 +1270,8 @@ export function useVideoEditor() {
     setOriginalAudioVolume,
     loopMusic,
     setLoopMusic,
+    replaceAudio,
+    setReplaceAudio,
     overlayFile,
     setOverlayFile,
     overlayPosition,
@@ -1101,7 +1281,7 @@ export function useVideoEditor() {
     overlayOpacity,
     setOverlayOpacity,
     recommendedPreset,
-    currentTime,
+    getCurrentTime,
     toggleSound,
     // Phase 1 MVP: Multi-track timeline support
     multiTrackState,

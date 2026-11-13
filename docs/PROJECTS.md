@@ -12,6 +12,7 @@ This covers how Reframe keeps edit history, what it saves in the browser, and th
 | Keep audio, normalise, volume, speed | `recipe` |
 | Quality, format, brightness, contrast, saturation, sharpness, stabilisation, denoise | `recipe` |
 | Text overlays (text, position, size, colour, weight, font name) | `recipe.textOverlays` |
+| Crop: the kept rectangle as fractions (0–1) of the source frame; missing means the whole frame, so older files still open | `recipe.crop` |
 | Image overlay position, size and opacity | `imageOverlay` |
 
 Not included, on purpose:
@@ -19,7 +20,7 @@ Not included, on purpose:
 - **The completion-sound preference.** It's a setting, not an edit, so undo never flips it.
 - **Files** (the source video, the image overlay file, background music). They are binary assets, not edit values, so adding or removing the image file is not an undo step.
 - **Transient UI state.** Hover, open panels, the selected text overlay, export progress, object URLs and worker state.
-- **The multi-track timeline state.** It isn't connected to the UI or the export yet (see `PHASE_1_MVP.md`).
+- **The multi-track timeline state.** It isn't connected to the UI or the export yet (see [history/PHASE_1_MVP.md](history/PHASE_1_MVP.md)).
 
 `useVideoEditor` exposes `recipe` derived from `EditState`. `handleExport` passes that same object, plus the image overlay settings, to `exportVideo`. So after an undo the preview and the export can't disagree.
 
@@ -64,16 +65,11 @@ Then the stored video copy is read from IndexedDB:
   - A different file keeps the other settings but resets the trim points, like any new video.
   - "Discard saved edits" forgets the project.
 
-**Failures are reported in the "Saved on this device" panel:**
-
-- If the video copy can't be stored, the user is told they'll need to choose the file again after a refresh.
-- If the edit record can't be written, they're told to use "Save project file".
-
-**Delete saved data** asks for confirmation. It then removes the project record, the recipe and overlay records and the stored video copy, closes the video and resets the editor. Project files the user saved are not affected.
+The editor no longer has a "Saved on this device" panel, so it has no buttons to save or open project files or to delete saved data. Saving fails quietly: after a refresh the user is asked to choose the video again. Clearing the site's data in the browser removes everything stored. `useVideoEditor` still has `buildProjectFile`, `importProjectFile` and `deleteSavedData` (which also clears the cached timeline frames), ready for a future UI.
 
 ## Project file format
 
-"Save project file" downloads `<video name>.reframe.json`:
+`buildProjectFile` produces `<video name>.reframe.json`:
 
 ```json
 {
@@ -129,13 +125,6 @@ Documents from a newer schema than the page knows are refused with "saved by a n
 
 A change to `EditRecipe` fields needs a project schema bump, because the validator requires every field.
 
-## Not done yet: export profiles
+## Export profiles
 
-Reusable export profiles were scoped out of this change so undo/redo and recovery could land as one coherent slice. The suggested next slice:
-
-- **Profiles.** A profile is a named subset of `EditState["recipe"]`: preset or custom size, framing, format, quality and audio options. It is stored in its own localStorage key with its own schema version, and never includes trims, overlays or media.
-- **Built-in profiles.** Landscape 1920×1080, square 1080×1080 and portrait 1080×1920, plus 1080×1350. Label them by shape and size, not by platform name, to avoid implying endorsement.
-- **Applying a profile.** Applying one is one undoable `updateEdit` step. Manual controls stay as they are.
-- **Command-builder tests.** A test runs every profile through the worker's `buildArguments`/`buildVideoFilter` and asserts the scale and pad output matches the declared dimensions.
-- **Safe-area guides.** A CSS overlay on the preview only. It is not part of `EditState`, so it can't reach the export.
-- **Batch export, if added.** Encode one profile at a time through the existing worker, never concurrently, and report each output's success or failure separately.
+Implemented separately; see [EXPORT_PROFILES.md](EXPORT_PROFILES.md). Applying a profile is one undo step and changes only the output fields of `EditState`. Profiles are stored apart from projects, and a project file doesn't include them.
